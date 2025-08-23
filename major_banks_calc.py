@@ -98,7 +98,7 @@ def updateGraph(selectedBank, selectedMetric):
         ))
 
     fig.update_layout(
-        title=f"{selectedMetric.replace('Returns',' Returns').replace('Volatility',' Volatility')} of Selected Banks",
+        title=f"{selectedMetric.replace('daily', 'Daily').replace('cumulative', 'Cumulative').replace('Returns',' Returns').replace('Volatility',' Volatility')} of Selected Banks",
         xaxis_title="Date",
         yaxis_title=yLabel,
         hovermode="x unified",
