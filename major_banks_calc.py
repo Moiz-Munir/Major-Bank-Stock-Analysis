@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from dash import Dash, dcc, html
 from dash.dependencies import Input, Output
 import webbrowser
+from statsmodels.tsa.arima.model import ARIMA
 
 # Download data
 tickers = ["BMO.TO", "TD.TO", "RY.TO", "CM.TO", "BNS.TO"]
@@ -58,31 +59,54 @@ app.layout = html.Div([
         value='cumulativeReturns'
     ),
 
-    html.Label("Show Monte Carlo Forecast"),
     dcc.Checklist(
         id='forecastToggle',
-        options=[{'label': 'Forecast', 'value': 'showForecast'}],
+        options=[
+            {'label': 'Monte Carlo Forecast', 'value': 'monteCarlo'},
+            {'label': 'ARIMA Forecast', 'value': 'arima'}
+        ],
         value=[]
     ),
 
     dcc.Graph(id='bankGraph')
 ])
 
-def monteCarloForecast(bank, lastPrice, meanReturn, stdReturn):
+# Monte Carlo Simulation Function
+def monteCarloForecast(lastPrice, meanReturn, stdReturn):
     nDays=60
     nSim=1000
     
     simPrices = np.zeros((nDays, nSim))
-    for i in range (nSim):
+    for i in range(nSim):
         price = lastPrice
-        for j in range (nDays):
-            price = price * (1+ np.random.normal(meanReturn, stdReturn))
+        for j in range(nDays):
+            price = price * (1 + np.random.normal(meanReturn, stdReturn))
             simPrices[j, i] = price
     lower = np.percentile(simPrices, 5, axis=1)
     upper = np.percentile(simPrices, 95, axis=1)
     median = np.percentile(simPrices, 50, axis=1)
     futureDates = pd.date_range(start=bankData.index[-1] + pd.Timedelta(days=1), periods=nDays, freq='B')
     return futureDates, median, lower, upper
+
+# ARIMA Forecast Function
+def arimaForecast(bankSeries):
+    returns = bankSeries.pct_change().dropna()
+
+    model = ARIMA(returns, order=(1,0,1))  # simple ARMA for returns
+    fittedModel = model.fit()
+
+    forecast_returns = fittedModel.forecast(steps=60)
+
+    lastPrice = bankSeries.iloc[-1]
+    forecast_prices = [lastPrice]
+    for r in forecast_returns:
+        forecast_prices.append(forecast_prices[-1] * (1 + r))
+
+    forecast_prices = forecast_prices[1:]  # drop starting price
+    futureDates = pd.date_range(start=bankSeries.index[-1] + pd.Timedelta(days=1), periods=60, freq='B')
+
+    return futureDates, forecast_prices
+
 
 # Callback to update graph
 @app.callback(
@@ -91,7 +115,6 @@ def monteCarloForecast(bank, lastPrice, meanReturn, stdReturn):
     Input('metricDropdown', 'value'),
     Input('forecastToggle', 'value')
 )
-
 def updateGraph(selectedBank, selectedMetric, forecastToggle):
     fig = go.Figure()
 
@@ -117,33 +140,44 @@ def updateGraph(selectedBank, selectedMetric, forecastToggle):
             line=dict(color=colors[bank], width=2)
         ))
 
-    # Add forecast if selected
-    if 'showForecast' in forecastToggle and selectedBank != 'All' and selectedMetric == 'cumulativeReturns':
-        lastPrice = cumulativeReturns[selectedBank].iloc[-1]
-        meanReturn = dailyReturns[selectedBank].mean()
-        stdReturn = dailyReturns[selectedBank].std()
-        
-        futureDates, median, lower, upper = monteCarloForecast(selectedBank, lastPrice, meanReturn, stdReturn)
+    # Forecasts only apply if single bank + cumulativeReturns
+    if selectedBank != 'All' and selectedMetric == 'cumulativeReturns':
+        # Monte Carlo Forecast
+        if 'monteCarlo' in forecastToggle:
+            lastPrice = cumulativeReturns[selectedBank].iloc[-1]
+            meanReturn = dailyReturns[selectedBank].mean()
+            stdReturn = dailyReturns[selectedBank].std()
+            futureDates, median, lower, upper = monteCarloForecast(lastPrice, meanReturn, stdReturn)
 
+            fig.add_trace(go.Scatter(
+                x=futureDates,
+                y=median,
+                mode='lines',
+                name=f"{labels[selectedBank]} Monte Carlo Median",
+                line=dict(color=colors[selectedBank], width=2, dash='dash')
+            ))
+            fig.add_trace(go.Scatter(
+                x=np.concatenate([futureDates, futureDates[::-1]]),
+                y=np.concatenate([upper, lower[::-1]]),
+                fill='toself',
+                fillcolor='rgba(0,0,0,0.1)',
+                line=dict(color='rgba(0,0,0,0)'),
+                showlegend=True,
+                name=f"{labels[selectedBank]} 5-95% Range"
+            ))
 
-        # Median forecast
-        fig.add_trace(go.Scatter(
-            x=futureDates,
-            y=median,
-            mode='lines',
-            name=f"{labels[selectedBank]} Forecast Median",
-            line=dict(color=colors[selectedBank], width=2, dash='dash')
-        ))
-        # Confidence interval
-        fig.add_trace(go.Scatter(
-            x=np.concatenate([futureDates, futureDates[::-1]]),
-            y=np.concatenate([upper, lower[::-1]]),
-            fill='toself',
-            fillcolor='rgba(0,0,0,0.1)',
-            line=dict(color='rgba(0,0,0,0)'),
-            showlegend=True,
-            name=f"{labels[selectedBank]} 5-95% Forecast"
-        ))
+        # ARIMA Forecast
+        if 'arima' in forecastToggle:
+            futureDates, forecast_prices = arimaForecast(bankData[selectedBank])
+            forecastCumulative = np.array(forecast_prices) / bankData[selectedBank].iloc[0]
+
+            fig.add_trace(go.Scatter(
+                x=futureDates,
+                y=forecastCumulative,
+                mode='lines',
+                name=f"{labels[selectedBank]} ARIMA Forecast",
+                line=dict(color=colors[selectedBank], width=2, dash='dot')
+            ))
 
     fig.update_layout(
         title=f"{selectedMetric.replace('daily', 'Daily').replace('cumulative', 'Cumulative').replace('Returns',' Returns').replace('Volatility',' Volatility')} of Selected Banks",
@@ -153,7 +187,6 @@ def updateGraph(selectedBank, selectedMetric, forecastToggle):
         legend_title="Bank",
         template="plotly_white"
     )
-
     return fig
 
 # Run app
