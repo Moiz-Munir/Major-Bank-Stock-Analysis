@@ -1,21 +1,22 @@
-# interactiveBankAnalysis.py
+# Imports 
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, dcc, html
 from dash.dependencies import Input, Output
 import webbrowser
 
-# 1. Download data
+# Download data
 tickers = ["BMO.TO", "TD.TO", "RY.TO", "CM.TO", "BNS.TO"]
 bankData = yf.download(tickers, period="5y")['Close']
 
-# 2. Calculate returns
+# Calculate returns
 dailyReturns = bankData.pct_change()
 cumulativeReturns = (1 + dailyReturns).cumprod()
 rollingVolatility = dailyReturns.rolling(window=30).std().dropna()
 
-# 3. Colors and labels
+# Colors and labels
 colors = {
     "BMO.TO": "blue",
     "TD.TO": "green",
@@ -32,10 +33,10 @@ labels = {
     "BNS.TO": "Scotiabank"
 }
 
-# 4. Initialize Dash app
+# Initialize Dash app
 app = Dash(__name__)
 
-# 5. Layout
+# Layout
 app.layout = html.Div([
     html.H1("Interactive Analysis of 5 Major Canadian Banks"),
 
@@ -57,16 +58,44 @@ app.layout = html.Div([
         value='cumulativeReturns'
     ),
 
+    html.Label("Show Monte Carlo Forecast"),
+    dcc.Checklist(
+        id='forecastToggle',
+        options=[{'label': 'Forecast', 'value': 'showForecast'}],
+        value=[]
+    ),
+
     dcc.Graph(id='bankGraph')
 ])
 
-# 6. Callback to update graph
+def monteCarloForecast(bank, lastPrice, meanReturn, stdReturn):
+    nDays=60
+    nSim=1000
+    
+    simPrices = np.zeros((nDays, nSim))
+    for i in range (nSim):
+        price = lastPrice
+        for j in range (nDays):
+            price = price * (1+ np.random.normal(meanReturn, stdReturn))
+            simPrices[j, i] = price
+    lower = np.percentile(simPrices, 5, axis=1)
+    upper = np.percentile(simPrices, 95, axis=1)
+    median = np.percentile(simPrices, 50, axis=1)
+    futureDates = pd.date_range(start=bankData.index[-1] + pd.Timedelta(days=1), periods=nDays, freq='B')
+    return futureDates, median, lower, upper
+
+# Callback to update graph
 @app.callback(
     Output('bankGraph', 'figure'),
     Input('bankDropdown', 'value'),
-    Input('metricDropdown', 'value')
+    Input('metricDropdown', 'value'),
+    Input('forecastToggle', 'value')
 )
-def updateGraph(selectedBank, selectedMetric):
+
+def updateGraph(selectedBank, selectedMetric, forecastToggle):
+    fig = go.Figure()
+
+    # Determine metric to plot
     if selectedMetric == 'cumulativeReturns':
         dataToPlot = cumulativeReturns
         yLabel = "Cumulative Return ($1 Invested)"
@@ -77,24 +106,43 @@ def updateGraph(selectedBank, selectedMetric):
         dataToPlot = rollingVolatility
         yLabel = "Volatility (Std Dev of Daily Returns)"
 
-    fig = go.Figure()
-
-    if selectedBank == 'All':
-        for bank in dataToPlot.columns:
-            fig.add_trace(go.Scatter(
-                x=dataToPlot.index,
-                y=dataToPlot[bank],
-                mode='lines',
-                name=labels[bank],
-                line=dict(color=colors[bank], width=2)
-            ))
-    else:
+    # Plot historical data
+    banksToPlot = dataToPlot.columns if selectedBank == 'All' else [selectedBank]
+    for bank in banksToPlot:
         fig.add_trace(go.Scatter(
             x=dataToPlot.index,
-            y=dataToPlot[selectedBank],
+            y=dataToPlot[bank],
             mode='lines',
-            name=labels[selectedBank],
-            line=dict(color=colors[selectedBank], width=2)
+            name=labels[bank],
+            line=dict(color=colors[bank], width=2)
+        ))
+
+    # Add forecast if selected
+    if 'showForecast' in forecastToggle and selectedBank != 'All' and selectedMetric == 'cumulativeReturns':
+        lastPrice = cumulativeReturns[selectedBank].iloc[-1]
+        meanReturn = dailyReturns[selectedBank].mean()
+        stdReturn = dailyReturns[selectedBank].std()
+        
+        futureDates, median, lower, upper = monteCarloForecast(selectedBank, lastPrice, meanReturn, stdReturn)
+
+
+        # Median forecast
+        fig.add_trace(go.Scatter(
+            x=futureDates,
+            y=median,
+            mode='lines',
+            name=f"{labels[selectedBank]} Forecast Median",
+            line=dict(color=colors[selectedBank], width=2, dash='dash')
+        ))
+        # Confidence interval
+        fig.add_trace(go.Scatter(
+            x=np.concatenate([futureDates, futureDates[::-1]]),
+            y=np.concatenate([upper, lower[::-1]]),
+            fill='toself',
+            fillcolor='rgba(0,0,0,0.1)',
+            line=dict(color='rgba(0,0,0,0)'),
+            showlegend=True,
+            name=f"{labels[selectedBank]} 5-95% Forecast"
         ))
 
     fig.update_layout(
@@ -108,7 +156,7 @@ def updateGraph(selectedBank, selectedMetric):
 
     return fig
 
-# 7. Run app
+# Run app
 if __name__ == '__main__':
     webbrowser.open("http://127.0.0.1:8050/")
     app.run(debug=True, host='127.0.0.1', port=8050)
